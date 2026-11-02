@@ -195,7 +195,7 @@ class MainWindow(QMainWindow):
         self.history_list = QListWidget()
         self.history_delegate = HistoryItemDelegate(self.history_list, self.theme_selector.currentData())
         self.history_list.setItemDelegate(self.history_delegate)
-        self.history_list.currentItemChanged.connect(self.select_job)
+        self.history_list.itemSelectionChanged.connect(self.select_job)
         side.addWidget(self.history_list, 1)
         splitter.addWidget(sidebar)
         self.pages = QStackedWidget()
@@ -434,8 +434,10 @@ class MainWindow(QMainWindow):
         if self.selected_id:
             self.show_job(self.selected_id)
 
-    def select_job(self, item, previous):
-        if item:
+    def select_job(self):
+        selected_items = self.history_list.selectedItems()
+        if selected_items:
+            item = selected_items[0]
             self.selected_id = item.data(Qt.ItemDataRole.UserRole)
             self.show_job(self.selected_id)
 

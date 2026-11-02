@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtGui import QImage, QPalette
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QItemSelectionModel, Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QStyleOptionViewItem
     from video_app.core import make_payload, read_inputs
@@ -314,6 +314,120 @@ class GuiTests(unittest.TestCase):
         local_id = self.window.history.create(inputs, image_bytes)
         self.window.history.update(local_id, status=status, error=error)
         return local_id
+
+    def draft_state(self):
+        return {
+            "image": self.window.image_path.text(),
+            "text_mode": self.window.text_mode.currentData(),
+            "text_path": self.window.text_path.text(),
+            "prompt": self.window.prompt.toPlainText(),
+            "voice": self.window.voice_id.text(),
+            "duration": self.window.duration.value(),
+            "resolution": self.window.resolution_choice.currentData(),
+            "width": self.window.output_width.value(),
+            "height": self.window.output_height.value(),
+        }
+
+    def automatically_focus_first_history_item(self):
+        index = self.window.history_list.model().index(0, 0)
+        self.window.history_list.selectionModel().setCurrentIndex(
+            index, QItemSelectionModel.SelectionFlag.NoUpdate
+        )
+
+    def test_polling_during_file_selection_keeps_new_draft_open(self):
+        local_id = self.create_history_job("completed")
+        self.window.refresh_history()
+        self.window.history_list.setCurrentRow(0)
+        replacement = self.directory / "replacement.png"
+        image = QImage(80, 60, QImage.Format.Format_RGB32)
+        image.fill(0x4488AA)
+        image.save(str(replacement))
+        text_file = self.directory / "text.txt"
+        text_file.write_text("Текст из файла", encoding="utf-8")
+
+        for source in ("image", "text"):
+            with self.subTest(source=source):
+                self.window.new_draft()
+                self.window.image_path.setText(str(self.image))
+                self.window.prompt.setPlainText("Текст нового запроса")
+                self.window.voice_id.setText("new-voice")
+                self.window.duration.setValue(5)
+                self.window.resolution_choice.setCurrentIndex(
+                    self.window.resolution_choice.findData("custom")
+                )
+                self.window.output_width.setValue(800)
+                self.window.output_height.setValue(600)
+                if source == "text":
+                    self.window.text_mode.setCurrentIndex(1)
+                expected = self.draft_state()
+                chosen = replacement if source == "image" else text_file
+                field = self.window.image_path if source == "image" else self.window.text_path
+                expected["image" if source == "image" else "text_path"] = str(chosen)
+
+                def choose_file(*args):
+                    self.window.polled(local_id, {
+                        "id": "gen-completed",
+                        "status": "completed",
+                        "urls": ["https://cdn.example/video.mp4"],
+                    })
+                    self.automatically_focus_first_history_item()
+                    return str(chosen), ""
+
+                with patch("video_app.gui.QFileDialog.getOpenFileName", side_effect=choose_file):
+                    self.window.choose_file(field, "Выберите файл", "*")
+
+                self.assertEqual(self.window.pages.currentIndex(), 0)
+                self.assertIsNone(self.window.selected_id)
+                self.assertEqual(self.window.history_list.selectedItems(), [])
+                self.assertEqual(self.draft_state(), expected)
+                self.assertEqual(
+                    self.window.history.get(local_id)["response"]["urls"],
+                    ["https://cdn.example/video.mp4"],
+                )
+                self.window.token = "test-token"
+                with patch(
+                    "video_app.gui.QMessageBox.question",
+                    return_value=QMessageBox.StandardButton.Yes,
+                ), patch(
+                    "video_app.gui.ApiClient.request",
+                    return_value={"id": "gen-new-" + source, "status": "pending"},
+                ) as request:
+                    self.window.submit_button.click()
+                    self.wait_for_tasks()
+                    request.assert_called_once()
+                self.assertNotEqual(self.window.selected_id, local_id)
+                submitted = self.window.history.get(self.window.selected_id)["inputs"]
+                self.assertEqual(submitted["image_path"], str(Path(expected["image"]).resolve()))
+                self.assertEqual(submitted["voice_id"], "new-voice")
+                self.assertEqual(
+                    submitted["prompt"],
+                    "Текст из файла" if source == "text" else "Текст нового запроса",
+                )
+
+    def test_poll_failure_and_focus_keep_copied_draft_open(self):
+        local_id = self.create_history_job("completed")
+        self.window.refresh_history()
+        self.window.clone_job(local_id)
+        self.window.prompt.setPlainText("Изменённый текст копии")
+        self.window.voice_id.setText("copied-voice")
+        expected = self.draft_state()
+        self.window.poll_failed(local_id, RuntimeError("Ошибка обновления ссылок"))
+        self.automatically_focus_first_history_item()
+        self.assertEqual(self.window.pages.currentIndex(), 0)
+        self.assertIsNone(self.window.selected_id)
+        self.assertEqual(self.draft_state(), expected)
+        self.assertIn("Ошибка обновления ссылок", self.window.history.get(local_id)["error"])
+
+    def test_history_opens_only_after_selecting_automatically_focused_item(self):
+        local_id = self.create_history_job("completed")
+        self.window.refresh_history()
+        self.window.new_draft()
+        self.automatically_focus_first_history_item()
+        self.assertIsNone(self.window.selected_id)
+        self.assertEqual(self.window.pages.currentIndex(), 0)
+        self.window.history_list.setCurrentRow(0)
+        self.assertEqual(self.window.selected_id, local_id)
+        self.assertEqual(self.window.pages.currentIndex(), 1)
 
     def history_style_option(self, row):
         option = QStyleOptionViewItem()
